@@ -238,11 +238,11 @@ function scrollStep() {
   if (scrollTargetY === null) { scrollAnimating = false; return; }
   const d = scrollTargetY - window.scrollY;
   if (Math.abs(d) < 0.5) { scrollTargetY = null; scrollAnimating = false; return; }
-  window.scrollBy(0, d * 0.1);
+  window.scrollBy(0, d * 0.18);
   requestAnimationFrame(scrollStep);
 }
-function scrollToCurrent() {
-  const s = spans[tracker.position];
+function scrollToCurrent(idx) {
+  const s = spans[idx];
   if (!s) return;
   scrollTargetY = window.scrollY + s.getBoundingClientRect().top - window.innerHeight * 0.5;
   if (!scrollAnimating) { scrollAnimating = true; requestAnimationFrame(scrollStep); }
@@ -250,12 +250,15 @@ function scrollToCurrent() {
 function updateView() {
   if (!tracker) return;
   const pos = tracker.position;
+  // anticipo da karaoke: la parola "corrente" è quella DOPO l'ultima riconosciuta,
+  // cioè quella che si sta pronunciando adesso
+  const cur = pos >= 0 ? Math.min(pos + 1, spans.length - 1) : -1;
   spans.forEach((s, i) => {
-    s.classList.toggle('read', i < pos);
-    s.classList.toggle('current', i === pos);
+    s.classList.toggle('read', i <= pos && i !== cur);
+    s.classList.toggle('current', i === cur);
   });
   $('status').className = (mic && mic.active) ? tracker.state : '';
-  if (pos >= 0) scrollToCurrent();
+  if (cur >= 0) scrollToCurrent(cur);
   else scrollTargetY = null;
 }
 
