@@ -315,7 +315,26 @@ function togglePlay() {
     manual.last = 0;
     if (manual.on) requestAnimationFrame(manualLoop);
   }
+  syncWakeLock();
 }
+// schermo sempre acceso mentre si legge (wake lock), rilasciato in pausa
+let wakeLock = null;
+function isRunning() { return (mic && mic.active) || manual.on; }
+async function syncWakeLock() {
+  if (isRunning() && !wakeLock && navigator.wakeLock) {
+    try {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => { wakeLock = null; });
+    } catch (e) {}
+  } else if (!isRunning() && wakeLock) {
+    wakeLock.release();
+    wakeLock = null;
+  }
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') syncWakeLock();
+});
+
 document.addEventListener('keydown', (e) => {
   if (e.target.tagName === 'INPUT') return;
   if (e.code === 'Space') { e.preventDefault(); togglePlay(); }
