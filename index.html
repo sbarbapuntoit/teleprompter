@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Teleprompter Sbarba</title>
+<style>
+  :root { --fs: 42px; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:#000; color:#eee; font-family:-apple-system,'Segoe UI',sans-serif; }
+  #toolbar { position:fixed; top:0; left:0; right:0; display:flex; gap:8px; align-items:center;
+             padding:8px 12px; background:rgba(20,20,20,.94); z-index:10; flex-wrap:wrap; }
+  button { background:#333; color:#eee; border:0; border-radius:8px; padding:10px 14px; font-size:16px; cursor:pointer; }
+  button:active { background:#555; }
+  #status { width:16px; height:16px; border-radius:50%; background:#e33; flex:none; }
+  #status.following { background:#2c2; }
+  #status.waiting { background:#f90; }
+  #fileName { font-size:13px; opacity:.6; }
+  #msg { width:100%; font-size:13px; color:#f90; }
+  #script { padding:45vh 8vw; font-size:var(--fs); line-height:1.6; }
+  #script.mirror { transform:scaleX(-1); }
+  #script p { margin:0 0 1em; }
+  .w { opacity:.85; }
+  .w.read { opacity:.3; }
+  .w.current { color:#ffd54a; opacity:1; }
+  #simPanel { position:fixed; bottom:0; left:0; right:0; background:#222; padding:8px; display:flex; gap:8px; z-index:10; }
+  #simPanel input { flex:1; font-size:16px; padding:8px; background:#111; color:#eee; border:1px solid #444; border-radius:8px; }
+</style>
+</head>
+<body>
+<div id="toolbar">
+  <span id="status" title="stato"></span>
+  <button id="btnOpen">📂 Apri script</button>
+  <input type="file" id="fileInput" accept=".txt,.md" hidden>
+  <button id="btnMic" hidden>🎤 Avvia</button>
+  <button id="btnSlower" hidden>🐢 −</button>
+  <button id="btnFaster" hidden>🐇 +</button>
+  <button id="btnRestart">⏮</button>
+  <button id="btnPrev">↑¶</button>
+  <button id="btnNext">↓¶</button>
+  <button id="btnSmaller">A−</button>
+  <button id="btnBigger">A+</button>
+  <button id="btnMirror">🪞</button>
+  <span id="fileName"></span>
+  <span id="msg" hidden></span>
+</div>
+<div id="script"><p style="opacity:.5">Apri uno script (📂), poi premi 🎤 e inizia a leggere. Spazio o tocco sul testo = pausa/riprendi.</p></div>
+<div id="simPanel" hidden>
+  <button id="simRead">▶ Leggi 5 parole</button>
+  <button id="simOff">💬 A braccio</button>
+  <input id="simInput" placeholder="scrivi parole e premi Invio">
+</div>
+<script>
+// src/engine.js — motore di inseguimento vocale (puro, senza DOM)
+(function (root, factory) {
+  if (typeof module === 'object' && module.exports) module.exports = factory();
+  else root.TeleEngine = factory();
+})(typeof self !== 'undefined' ? self : this, function () {
+  function normalize(word) {
+    return word
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9]/g, '');
+  }
+
+  function tokenize(text) {
+    const tokens = [];
+    text.split(/\n\s*\n/).forEach((p, pi) => {
+      p.split(/\s+/).forEach((w) => {
+        const norm = normalize(w);
+        if (norm) tokens.push({ text: w, norm, par: pi });
+      });
+    });
+    return tokens;
+  }
+
+  function editDistance(a, b, max) {
+    if (Math.abs(a.length - b.length) > max) return max + 1;
+    let prev = [], cur = [];
+    for (let j = 0; j <= b.length; j++) prev[j] = j;
+    for (let i = 1; i <= a.length; i++) {
+      cur[0] = i;
+      let rowMin = cur[0];
+      for (let j = 1; j <= b.length; j++) {
+        cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+        rowMin = Math.min(rowMin, cur[j]);
+      }
+      if (rowMin > max) return max + 1;
+      [prev, cur] = [cur, prev];
+    }
+    return prev[b.length];
+  }
+
+  function fuzzyMatch(a, b) {
+    if (a === b) return true;
+    const len = Math.max(a.length, b.length);
+    if (len <= 3) return false;
+    const max = len >= 7 ? 2 : 1;
+    return editDistance(a, b, max) <= max;
+  }
+
+  const WINDOW = 25, MISS_LIMIT = 4, RELOCK_STREAK = 3;
+
+  class Tracker {
+    constructor(tokens) {
+      this.tokens = tokens;
+      this.position = -1;
+      this.state = 'following';
+      this.missStreak = 0;
+      this.candidate = null; // {index, streak} durante il riaggancio
+      this.lastHint = null;  // {norm, advancedTo} ultima parola provvisoria usata
+    }
+    _findRange(norm, from, to) {
+      const end = Math.min(to, this.tokens.length);
+      for (let i = Math.max(0, from); i < end; i++)
+        if (fuzzyMatch(norm, this.tokens[i].norm)) return i;
+      return -1;
+    }
+    _findInWindow(norm, from) { return this._findRange(norm, from, from + WINDOW); }
+    // inizio di una possibile striscia: prima vicino, poi avanti lontano, poi indietro
+    _startCandidate(norm) {
+      const near = this._findInWindow(norm, this.position + 1);
+      if (near >= 0) return near;
+      const ahead = this._findRange(norm, this.position + 1 + WINDOW, this.tokens.length);
+      if (ahead >= 0) return ahead;
+      return this._findRange(norm, 0, this.position + 1);
+    }
+    _updateCandidate(norm) {
+      if (this.candidate) {
+        const next = this._findRange(norm, this.candidate.index + 1, this.candidate.index + 4);
+        if (next >= 0) { this.candidate = { index: next, streak: this.candidate.streak + 1 }; return; }
+      }
+      const start = this._startCandidate(norm);
+      this.candidate = start >= 0 ? { index: start, streak: 1 } : null;
+    }
+    _relock() {
+      this.position = this.candidate.index;
+      this.state = 'following';
+      this.missStreak = 0;
+      this.candidate = null;
+    }
+    // parola provvisoria del riconoscimento: può solo far fare il passo sicuro
+    // (1-3 parole adiacenti), mai miss, mai salti, mai cambio di stato
+    feedHint(raw) {
+      const norm = normalize(raw);
+      if (!norm || this.state !== 'following') return { position: this.position, state: this.state };
+      if (this.lastHint && this.lastHint.norm === norm && this.lastHint.advancedTo === this.position) {
+        return { position: this.position, state: this.state }; // già applicata
+      }
+      const hit = this._findRange(norm, this.position + 1, this.position + 4);
+      if (hit >= 0) this.position = hit;
+      this.lastHint = { norm, advancedTo: hit >= 0 ? hit : null };
+      return { position: this.position, state: this.state };
+    }
+    feedWord(raw) {
+      const norm = normalize(raw);
+      if (!norm) return { position: this.position, state: this.state };
+      // conferma stabile di una provvisoria già applicata: niente doppio passo
+      if (this.lastHint) {
+        const h = this.lastHint;
+        this.lastHint = null;
+        if (h.norm === norm && h.advancedTo !== null && this.position === h.advancedTo) {
+          return { position: this.position, state: this.state };
+        }
+      }
+      // parole corte ("e", "del", "una"): troppo comuni per fare da prova.
+      // Possono solo far avanzare di poco se combaciano subito; mai miss, mai salti.
+      if (norm.length <= 3) {
+        if (this.state === 'following') {
+          const hit = this._findRange(norm, this.position + 1, this.position + 4);
+          if (hit >= 0) this.position = hit;
+        }
+        return { position: this.position, state: this.state };
+      }
+      if (this.state === 'following') {
+        const hit = this._findInWindow(norm, this.position + 1);
+        if (hit >= 0) {
+          this.position = hit; this.missStreak = 0; this.candidate = null;
+        } else {
+          this.missStreak++;
+          this._updateCandidate(norm);
+          if (this.candidate && this.candidate.streak >= RELOCK_STREAK) this._relock();
+          else if (this.missStreak >= MISS_LIMIT) this.state = 'waiting';
+        }
+      } else {
+        this._updateCandidate(norm);
+        if (this.candidate && this.candidate.streak >= RELOCK_STREAK) this._relock();
+      }
+      return { position: this.position, state: this.state };
+    }
+    jumpTo(index) {
+      this.position = Math.max(-1, Math.min(index, this.tokens.length - 1));
+      this.state = 'following';
+      this.missStreak = 0;
+      this.candidate = null;
+      this.lastHint = null;
+    }
+  }
+
+  return { normalize, tokenize, editDistance, fuzzyMatch, Tracker, WINDOW, MISS_LIMIT, RELOCK_STREAK };
+});
+</script>
+<script>
+const $ = (id) => document.getElementById(id);
+const { tokenize, Tracker } = TeleEngine;
+let tokens = [], tracker = null, spans = [], mic = null;
+
+function loadText(text, name) {
+  tokens = tokenize(text);
+  tracker = new Tracker(tokens);
+  renderScript();
+  try { localStorage.setItem('tp_text', text); localStorage.setItem('tp_name', name || ''); } catch (e) {}
+  $('fileName').textContent = name || '';
+  window.scrollTo(0, 0);
+  updateView();
+}
+
+function renderScript() {
+  const el = $('script');
+  el.innerHTML = '';
+  spans = [];
+  let curPar = -1, p = null;
+  tokens.forEach((t) => {
+    if (t.par !== curPar) { curPar = t.par; p = document.createElement('p'); el.appendChild(p); }
+    const s = document.createElement('span');
+    s.className = 'w';
+    s.textContent = t.text;
+    spans.push(s);
+    p.appendChild(s);
+    p.appendChild(document.createTextNode(' '));
+  });
+}
+
+// scroll morbido: il bersaglio si aggiorna a ogni parola, l'animazione insegue senza ripartire
+let scrollTargetY = null, scrollAnimating = false;
+function scrollStep() {
+  if (scrollTargetY === null) { scrollAnimating = false; return; }
+  const d = scrollTargetY - window.scrollY;
+  if (Math.abs(d) < 0.5) { scrollTargetY = null; scrollAnimating = false; return; }
+  window.scrollBy(0, d * 0.1);
+  requestAnimationFrame(scrollStep);
+}
+function scrollToCurrent() {
+  const s = spans[tracker.position];
+  if (!s) return;
+  scrollTargetY = window.scrollY + s.getBoundingClientRect().top - window.innerHeight * 0.5;
+  if (!scrollAnimating) { scrollAnimating = true; requestAnimationFrame(scrollStep); }
+}
+function updateView() {
+  if (!tracker) return;
+  const pos = tracker.position;
+  spans.forEach((s, i) => {
+    s.classList.toggle('read', i < pos);
+    s.classList.toggle('current', i === pos);
+  });
+  $('status').className = (mic && mic.active) ? tracker.state : '';
+  if (pos >= 0) scrollToCurrent();
+  else scrollTargetY = null;
+}
+
+function feed(word) { if (tracker) { tracker.feedWord(word); updateView(); } }
+function feedHint(word) { if (tracker) { tracker.feedHint(word); updateView(); } }
+
+function jumpPar(dir) {
+  if (!tracker || !tokens.length) return;
+  const curPar = tokens[Math.max(0, tracker.position)].par;
+  const idx = tokens.findIndex(t => t.par === curPar + dir);
+  if (idx >= 0) { tracker.jumpTo(idx); updateView(); }
+}
+
+// --- caricamento file + drag&drop ---
+$('btnOpen').onclick = () => $('fileInput').click();
+$('fileInput').onchange = (e) => {
+  const f = e.target.files[0];
+  if (f) f.text().then(t => loadText(t, f.name));
+  e.target.value = '';
+};
+document.addEventListener('dragover', e => e.preventDefault());
+document.addEventListener('drop', e => {
+  e.preventDefault();
+  const f = e.dataTransfer.files[0];
+  if (f) f.text().then(t => loadText(t, f.name));
+});
+
+// --- controlli ---
+$('btnRestart').onclick = () => { if (tracker) { tracker.jumpTo(-1); window.scrollTo({top:0, behavior:'smooth'}); updateView(); } };
+$('btnPrev').onclick = () => jumpPar(-1);
+$('btnNext').onclick = () => jumpPar(1);
+
+let fs = parseInt(localStorage.getItem('tp_fs')) || 42;
+function applyFs() { document.documentElement.style.setProperty('--fs', fs + 'px'); try { localStorage.setItem('tp_fs', fs); } catch (e) {} }
+$('btnSmaller').onclick = () => { fs = Math.max(20, fs - 4); applyFs(); };
+$('btnBigger').onclick = () => { fs = Math.min(90, fs + 4); applyFs(); };
+applyFs();
+
+let mirror = localStorage.getItem('tp_mirror') === '1';
+function applyMirror() { $('script').classList.toggle('mirror', mirror); try { localStorage.setItem('tp_mirror', mirror ? '1' : '0'); } catch (e) {} }
+$('btnMirror').onclick = () => { mirror = !mirror; applyMirror(); };
+applyMirror();
+
+function togglePlay() {
+  if (mic) {
+    if (mic.active) { mic.stop(); $('btnMic').textContent = '🎤 Avvia'; }
+    else { mic.start(); $('btnMic').textContent = '⏸ Pausa'; }
+    updateView();
+  } else {
+    manual.on = !manual.on;
+    manual.last = 0;
+    if (manual.on) requestAnimationFrame(manualLoop);
+  }
+}
+document.addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'INPUT') return;
+  if (e.code === 'Space') { e.preventDefault(); togglePlay(); }
+  if (e.code === 'ArrowUp') { e.preventDefault(); jumpPar(-1); }
+  if (e.code === 'ArrowDown') { e.preventDefault(); jumpPar(1); }
+});
+$('script').addEventListener('click', togglePlay);
+$('btnMic') && ($('btnMic').onclick = togglePlay);
+
+// --- fallback manuale (browser senza riconoscimento vocale) ---
+let manual = { on:false, speed:60, last:0 };
+function manualLoop(ts) {
+  if (!manual.on) return;
+  if (manual.last) window.scrollBy(0, manual.speed * (ts - manual.last) / 1000);
+  manual.last = ts;
+  requestAnimationFrame(manualLoop);
+}
+$('btnSlower').onclick = () => { manual.speed = Math.max(10, manual.speed - 10); };
+$('btnFaster').onclick = () => { manual.speed = Math.min(300, manual.speed + 10); };
+
+function showMsg(t) { const m = $('msg'); m.textContent = t; m.hidden = !t; }
+
+// quando il microfono è bloccato per sempre (permessi/iframe), si passa al manuale
+function enableManualFallback() {
+  mic = null;
+  $('btnMic').hidden = true;
+  $('btnSlower').hidden = false;
+  $('btnFaster').hidden = false;
+}
+
+// --- avvio ---
+const saved = localStorage.getItem('tp_text');
+if (saved) loadText(saved, localStorage.getItem('tp_name') || '');
+
+function createRecognizer(onWord, onHint, onChange) {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) return null;
+  const rec = new SR();
+  rec.lang = 'it-IT';
+  rec.continuous = true;
+  rec.interimResults = true;
+  let wanted = false;
+  let consumed = {}; // per result index: parole già inviate al motore
+  rec.onresult = (e) => {
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const res = e.results[i];
+      const words = res[0].transcript.trim().split(/\s+/).filter(Boolean);
+      // nei risultati provvisori l'ultima parola può ancora cambiare: si aspetta
+      const stable = res.isFinal ? words.length : Math.max(0, words.length - 1);
+      for (let k = consumed[i] || 0; k < stable; k++) onWord(words[k]);
+      consumed[i] = Math.max(consumed[i] || 0, stable);
+      // l'ultima parola provvisoria viene passata come "suggerimento" a basso rischio
+      if (!res.isFinal && words.length > 0 && consumed[i] === words.length - 1) {
+        onHint(words[words.length - 1]);
+      }
+    }
+  };
+  rec.onend = () => { consumed = {}; if (wanted) { try { rec.start(); } catch (e) {} } else onChange(); };
+  const FATAL = {
+    'not-allowed': 'Permesso microfono negato dal browser (not-allowed).',
+    'service-not-allowed': 'Servizio di dettatura non disponibile (service-not-allowed).',
+    'audio-capture': 'Microfono non trovato o occupato da un\'altra app (audio-capture).'
+  };
+  rec.onerror = (e) => {
+    if (FATAL[e.error]) {
+      wanted = false;
+      showMsg(FATAL[e.error] + ' Passo alla modalità manuale: spazio o tocco = via/pausa, 🐢/🐇 = velocità.');
+      enableManualFallback();
+      onChange();
+    }
+  };
+  return {
+    start() { wanted = true; showMsg(''); try { rec.start(); } catch (e) {} },
+    stop() { wanted = false; try { rec.stop(); } catch (e) {} },
+    get active() { return wanted; }
+  };
+}
+
+mic = createRecognizer(feed, feedHint, updateView);
+if (mic) {
+  $('btnMic').hidden = false;
+} else {
+  $('btnSlower').hidden = false;
+  $('btnFaster').hidden = false;
+  showMsg('Questo browser non ha il riconoscimento vocale: modalità manuale (spazio = via/pausa, 🐢/🐇 = velocità).');
+}
+
+// --- modalità simulazione (?sim) ---
+if (/[?&]sim/.test(location.search)) {
+  $('simPanel').hidden = false;
+  $('simRead').onclick = () => {
+    for (let k = 0; k < 5; k++) { const t = tokens[tracker ? tracker.position + 1 : 0]; if (t) feed(t.text); }
+  };
+  $('simOff').onclick = () => ['allora','volevo','raccontarvi','una','cosa'].forEach(feed);
+  $('simInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.target.value.trim().split(/\s+/).forEach(feed); e.target.value = ''; }
+  });
+}
+</script>
+</body>
+</html>
