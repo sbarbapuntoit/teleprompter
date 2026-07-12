@@ -8,29 +8,72 @@
      il riconoscimento vocale non funziona -->
 <link rel="manifest" href='data:application/manifest+json,{"name":"Teleprompter","display":"browser"}'>
 <style>
-  :root { --fs: 42px; }
+  :root { --fs: 42px; --accent: #ffd54a; --ink: #f2f2f2; --bg: #050505; }
   * { box-sizing: border-box; }
-  body { margin:0; background:#000; color:#eee; font-family:-apple-system,'Segoe UI',sans-serif; }
+  body { margin:0; background:var(--bg); color:var(--ink); font-family:-apple-system,'SF Pro Display','Segoe UI',sans-serif; }
+
+  /* barra di avanzamento dello script */
+  #progress { position:fixed; top:0; left:0; height:3px; width:0; background:var(--accent);
+              z-index:40; transition:width .3s ease; }
+
+  /* barra comandi in vetro smerigliato */
   #toolbar { position:fixed; top:0; left:0; right:0; display:flex; gap:8px; align-items:center;
-             padding:8px 12px; background:rgba(20,20,20,.94); z-index:10; flex-wrap:wrap; }
-  button { background:#333; color:#eee; border:0; border-radius:8px; padding:10px 14px; font-size:16px; cursor:pointer; }
-  button:active { background:#555; }
-  #status { width:16px; height:16px; border-radius:50%; background:#e33; flex:none; }
-  #status.following { background:#2c2; }
-  #status.waiting { background:#f90; }
-  #fileName { font-size:13px; opacity:.6; }
-  #msg { width:100%; font-size:13px; color:#f90; }
-  #script { padding:45vh 8vw; font-size:var(--fs); line-height:1.6; }
+             padding:10px 12px; background:rgba(16,16,16,.72);
+             -webkit-backdrop-filter:blur(14px); backdrop-filter:blur(14px);
+             border-bottom:1px solid rgba(255,255,255,.07); z-index:30; flex-wrap:wrap;
+             transition:transform .3s ease; }
+  body.cinema #toolbar { transform:translateY(-110%); }
+  button { background:rgba(255,255,255,.08); color:var(--ink); border:1px solid rgba(255,255,255,.09);
+           border-radius:10px; padding:10px 14px; font-size:16px; cursor:pointer;
+           transition:background .15s, border-color .15s; }
+  button:hover { background:rgba(255,255,255,.16); }
+  button:active { background:rgba(255,255,255,.24); }
+  button:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  button.on { border-color:var(--accent); color:var(--accent); }
+  #btnMic.on { border-color:#ff5252; color:#ff5252; }
+  #status { width:14px; height:14px; border-radius:50%; background:#666; flex:none; transition:background .2s; }
+  #status.following, #statusC.following { background:#35d05f; box-shadow:0 0 12px rgba(53,208,95,.7); animation:pulse 1.6s ease-in-out infinite; }
+  #status.waiting, #statusC.waiting { background:#ff9f1a; box-shadow:0 0 12px rgba(255,159,26,.6); animation:none; }
+  @keyframes pulse { 50% { opacity:.55; } }
+  #fileName { font-size:13px; opacity:.55; }
+  #msg { width:100%; font-size:13px; color:#ff9f1a; }
+
+  /* pillola comandi in modalità tutto schermo */
+  #cinemaBar { position:fixed; top:10px; right:10px; z-index:50; display:none; align-items:center; gap:10px;
+               background:rgba(16,16,16,.55); -webkit-backdrop-filter:blur(10px); backdrop-filter:blur(10px);
+               padding:6px 8px 6px 14px; border-radius:999px; opacity:.35; transition:opacity .2s; }
+  #cinemaBar:hover, #cinemaBar:active { opacity:1; }
+  body.cinema #cinemaBar { display:flex; }
+  #statusC { width:14px; height:14px; border-radius:50%; background:#666; }
+  #cinemaBar button { padding:6px 10px; border-radius:999px; }
+
+  /* il testo */
+  #script { padding:45vh 8vw 50vh; font-size:var(--fs); line-height:1.7; font-weight:500; }
   #script.mirror { transform:scaleX(-1); }
-  #script p { margin:0 0 1em; }
-  .w { opacity:.85; }
-  .w.read { opacity:.3; }
-  .w.current { color:#ffd54a; opacity:1; }
-  #simPanel { position:fixed; bottom:0; left:0; right:0; background:#222; padding:8px; display:flex; gap:8px; z-index:10; }
-  #simPanel input { flex:1; font-size:16px; padding:8px; background:#111; color:#eee; border:1px solid #444; border-radius:8px; }
+  #script p { margin:0 0 1.1em; }
+  .w { color:var(--ink); opacity:1; transition:color .18s ease, opacity .3s ease, text-shadow .18s ease; }
+  .w.read { opacity:.22; }
+  .w.current { color:var(--accent); text-shadow:0 0 18px rgba(255,213,74,.45); }
+
+  /* guida di lettura e dissolvenze */
+  #guide { position:fixed; left:1.6vw; top:50vh; transform:translateY(-50%); color:var(--accent);
+           opacity:.45; font-size:20px; pointer-events:none; z-index:6; }
+  #fadeTop, #fadeBottom { position:fixed; left:0; right:0; height:17vh; pointer-events:none; z-index:5; }
+  #fadeTop { top:0; background:linear-gradient(rgba(5,5,5,.97), rgba(5,5,5,0)); }
+  #fadeBottom { bottom:0; background:linear-gradient(rgba(5,5,5,0), rgba(5,5,5,.97)); }
+
+  #simPanel { position:fixed; bottom:0; left:0; right:0; background:#1a1a1a; padding:8px; display:flex; gap:8px; z-index:30; }
+  #simPanel input { flex:1; font-size:16px; padding:8px; background:#0d0d0d; color:var(--ink);
+                    border:1px solid #3a3a3a; border-radius:8px; }
+  body.cinema #simPanel { display:none; }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { transition:none !important; animation:none !important; }
+  }
 </style>
 </head>
 <body>
+<div id="progress"></div>
 <div id="toolbar">
   <span id="status" title="stato"></span>
   <button id="btnOpen">📂 Apri script</button>
@@ -38,16 +81,24 @@
   <button id="btnMic" hidden>🎤 Avvia</button>
   <button id="btnSlower" hidden>🐢 −</button>
   <button id="btnFaster" hidden>🐇 +</button>
-  <button id="btnRestart">⏮</button>
-  <button id="btnPrev">↑¶</button>
-  <button id="btnNext">↓¶</button>
+  <button id="btnRestart" title="Ricomincia">⏮</button>
+  <button id="btnPrev" title="Paragrafo precedente">↑¶</button>
+  <button id="btnNext" title="Paragrafo successivo">↓¶</button>
   <button id="btnSmaller">A−</button>
   <button id="btnBigger">A+</button>
-  <button id="btnMirror">🪞</button>
+  <button id="btnMirror" title="Specchio">🪞</button>
+  <button id="btnCinema" title="Tutto schermo (F)">⛶</button>
   <span id="fileName"></span>
   <span id="msg" hidden></span>
 </div>
-<div id="script"><p style="opacity:.5">Apri uno script (📂), poi premi 🎤 e inizia a leggere. Spazio o tocco sul testo = pausa/riprendi.</p></div>
+<div id="cinemaBar">
+  <span id="statusC"></span>
+  <button id="btnCinemaExit" title="Esci (Esc)">✕</button>
+</div>
+<div id="guide">▶</div>
+<div id="fadeTop"></div>
+<div id="fadeBottom"></div>
+<div id="script"><p style="opacity:.5">Apri uno script (📂), poi premi 🎤 e inizia a leggere. Spazio o tocco sul testo = pausa/riprendi. ⛶ = tutto schermo.</p></div>
 <div id="simPanel" hidden>
   <button id="simRead">▶ Leggi 5 parole</button>
   <button id="simOff">💬 A braccio</button>
@@ -279,7 +330,10 @@ function updateView() {
     s.classList.toggle('read', i <= pos && i !== cur);
     s.classList.toggle('current', i === cur);
   });
-  $('status').className = (mic && mic.active) ? tracker.state : '';
+  const stato = (mic && mic.active) ? tracker.state : '';
+  $('status').className = stato;
+  $('statusC').className = stato;
+  $('progress').style.width = spans.length ? (Math.max(0, pos + 1) / spans.length * 100) + '%' : '0';
   if (cur >= 0) scrollToCurrent(cur);
   else scrollTargetY = null;
 }
@@ -320,14 +374,32 @@ $('btnBigger').onclick = () => { fs = Math.min(90, fs + 4); applyFs(); };
 applyFs();
 
 let mirror = localStorage.getItem('tp_mirror') === '1';
-function applyMirror() { $('script').classList.toggle('mirror', mirror); try { localStorage.setItem('tp_mirror', mirror ? '1' : '0'); } catch (e) {} }
+function applyMirror() {
+  $('script').classList.toggle('mirror', mirror);
+  $('btnMirror').classList.toggle('on', mirror);
+  try { localStorage.setItem('tp_mirror', mirror ? '1' : '0'); } catch (e) {}
+}
 $('btnMirror').onclick = () => { mirror = !mirror; applyMirror(); };
 applyMirror();
 
+// --- modalità tutto schermo (cinema) ---
+function setCinema(on) {
+  document.body.classList.toggle('cinema', on);
+  $('btnCinema').classList.toggle('on', on);
+  if (on && document.documentElement.requestFullscreen) {
+    document.documentElement.requestFullscreen().catch(() => {});
+  } else if (!on && document.fullscreenElement && document.exitFullscreen) {
+    document.exitFullscreen().catch(() => {});
+  }
+}
+function isCinema() { return document.body.classList.contains('cinema'); }
+$('btnCinema').onclick = () => setCinema(!isCinema());
+$('btnCinemaExit').onclick = () => setCinema(false);
+
 function togglePlay() {
   if (mic) {
-    if (mic.active) { mic.stop(); $('btnMic').textContent = '🎤 Avvia'; }
-    else { mic.start(); $('btnMic').textContent = '⏸ Pausa'; }
+    if (mic.active) { mic.stop(); $('btnMic').textContent = '🎤 Avvia'; $('btnMic').classList.remove('on'); }
+    else { mic.start(); $('btnMic').textContent = '⏸ Pausa'; $('btnMic').classList.add('on'); }
     updateView();
   } else {
     manual.on = !manual.on;
@@ -336,6 +408,7 @@ function togglePlay() {
   }
   syncWakeLock();
 }
+
 // schermo sempre acceso mentre si legge (wake lock), rilasciato in pausa
 let wakeLock = null;
 function isRunning() { return (mic && mic.active) || manual.on; }
@@ -359,9 +432,11 @@ document.addEventListener('keydown', (e) => {
   if (e.code === 'Space') { e.preventDefault(); togglePlay(); }
   if (e.code === 'ArrowUp') { e.preventDefault(); jumpPar(-1); }
   if (e.code === 'ArrowDown') { e.preventDefault(); jumpPar(1); }
+  if (e.code === 'KeyF') { e.preventDefault(); setCinema(!isCinema()); }
+  if (e.code === 'Escape' && isCinema()) setCinema(false);
 });
 $('script').addEventListener('click', togglePlay);
-$('btnMic') && ($('btnMic').onclick = togglePlay);
+$('btnMic').onclick = togglePlay;
 
 // --- fallback manuale (browser senza riconoscimento vocale) ---
 let manual = { on:false, speed:60, last:0 };
