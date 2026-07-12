@@ -103,7 +103,13 @@
     return editDistance(a, b, max) <= max;
   }
 
-  const WINDOW = 25, MISS_LIMIT = 4, RELOCK_STREAK = 3;
+  const WINDOW = 25, MISS_LIMIT = 4, RELOCK_SCORE = 2.0;
+
+  // parole italiane troppo comuni per fare da prova forte
+  const STOPWORDS = new Set(('anche allora ancora avere bene cioe come cosa cosi ecco della delle dello ' +
+    'dopo dove essere fare fatto infatti insomma loro meno mentre molto nella nelle nello niente nulla ' +
+    'ogni oggi oppure perche pero poco prima proprio quando quasi quella quelle quello questa queste ' +
+    'questo quindi sempre senza sono stato sulla sulle tanto tutta tutte tutti tutto vediamo verso volta').split(' '));
 
   class Tracker {
     constructor(tokens) {
@@ -111,8 +117,18 @@
       this.position = -1;
       this.state = 'following';
       this.missStreak = 0;
-      this.candidate = null; // {index, streak} durante il riaggancio
+      this.candidate = null; // {index, score} durante il riaggancio
       this.lastHint = null;  // {norm, advancedTo} ultima parola provvisoria usata
+      this.freq = {};        // occorrenze di ogni parola normalizzata nello script
+      tokens.forEach((t) => { this.freq[t.norm] = (this.freq[t.norm] || 0) + 1; });
+    }
+    // quanto "vale" una parola come prova: lunga e rara = oro, corta e comune = quasi niente
+    _weight(norm) {
+      const len = norm.length;
+      const lenF = len >= 8 ? 1 : len >= 6 ? 0.85 : len >= 4 ? 0.6 : 0.2;
+      const c = this.freq[norm] || 1;
+      const freqF = c <= 1 ? 1 : c === 2 ? 0.8 : c <= 4 ? 0.55 : 0.35;
+      return lenF * freqF * (STOPWORDS.has(norm) ? 0.5 : 1);
     }
     _findRange(norm, from, to) {
       const end = Math.min(to, this.tokens.length);
@@ -130,12 +146,13 @@
       return this._findRange(norm, 0, this.position + 1);
     }
     _updateCandidate(norm) {
+      const w = this._weight(norm);
       if (this.candidate) {
         const next = this._findRange(norm, this.candidate.index + 1, this.candidate.index + 4);
-        if (next >= 0) { this.candidate = { index: next, streak: this.candidate.streak + 1 }; return; }
+        if (next >= 0) { this.candidate = { index: next, score: this.candidate.score + w }; return; }
       }
       const start = this._startCandidate(norm);
-      this.candidate = start >= 0 ? { index: start, streak: 1 } : null;
+      this.candidate = start >= 0 ? { index: start, score: w } : null;
     }
     _relock() {
       this.position = this.candidate.index;
@@ -178,17 +195,19 @@
       }
       if (this.state === 'following') {
         const hit = this._findInWindow(norm, this.position + 1);
-        if (hit >= 0) {
+        if (hit >= 0 && (hit - this.position <= 8 || this._weight(norm) >= 0.5)) {
           this.position = hit; this.missStreak = 0; this.candidate = null;
+        } else if (hit >= 0) {
+          // parola comune che riecheggia lontano nella finestra: eco, non prova
         } else {
           this.missStreak++;
           this._updateCandidate(norm);
-          if (this.candidate && this.candidate.streak >= RELOCK_STREAK) this._relock();
+          if (this.candidate && this.candidate.score >= RELOCK_SCORE) this._relock();
           else if (this.missStreak >= MISS_LIMIT) this.state = 'waiting';
         }
       } else {
         this._updateCandidate(norm);
-        if (this.candidate && this.candidate.streak >= RELOCK_STREAK) this._relock();
+        if (this.candidate && this.candidate.score >= RELOCK_SCORE) this._relock();
       }
       return { position: this.position, state: this.state };
     }
@@ -201,7 +220,7 @@
     }
   }
 
-  return { normalize, tokenize, editDistance, fuzzyMatch, Tracker, WINDOW, MISS_LIMIT, RELOCK_STREAK };
+  return { normalize, tokenize, editDistance, fuzzyMatch, Tracker, WINDOW, MISS_LIMIT, RELOCK_SCORE };
 });
 </script>
 <script>
